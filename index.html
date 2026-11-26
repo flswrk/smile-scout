@@ -768,7 +768,7 @@ const FIREBASE_CONFIG = {
   measurementId: "G-VSLZBQ3RRY"
 };
 /* Admins: Firebase user UIDs (Firebase console, Authentication, Users). The same UIDs must be listed in the Firestore rules (adminUids). Admins get the Owner role. */
-const ADMIN_UIDS = ["VRyWi1sMRmbck6DktHplio78OjH3"];
+const ADMIN_UIDS = ["S6PJQfwpjVctweM9QPjpTE5AY1m1"];
 const isAdminUid = (id) => ADMIN_UIDS.indexOf(id) >= 0;
 /* the role the app uses: admins are owners; nobody else can be an owner, whatever their staff record says */
 const roleFor = (id, doc) => (isAdminUid(id) ? "owner" : (doc && (doc.role === "doctor" || doc.role === "counsellor") ? doc.role : "counsellor"));
