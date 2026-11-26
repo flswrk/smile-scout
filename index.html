@@ -3,6 +3,7 @@
 Smile Scout. This one file is the whole app.
 To go live, follow FIREBASE-SETUP.md, then paste your Firebase web-app settings into FIREBASE_CONFIG near the top of the script.
 Do not put patient data, backups or real prices in this file. They live in the database.
+Admins are the Firebase UIDs in ADMIN_UIDS (and in the Firestore rules). Staff are added inside the app.
 -->
 <html lang="en">
 <head>
@@ -766,6 +767,11 @@ const FIREBASE_CONFIG = {
   appId: "1:348424915745:web:beb7c98cd97f345d13cc60",
   measurementId: "G-VSLZBQ3RRY"
 };
+/* Admins: Firebase user UIDs (Firebase console, Authentication, Users). The same UIDs must be listed in the Firestore rules (adminUids). Admins get the Owner role. */
+const ADMIN_UIDS = ["VRyWi1sMRmbck6DktHplio78OjH3"];
+const isAdminUid = (id) => ADMIN_UIDS.indexOf(id) >= 0;
+/* the role the app uses: admins are owners; nobody else can be an owner, whatever their staff record says */
+const roleFor = (id, doc) => (isAdminUid(id) ? "owner" : (doc && (doc.role === "doctor" || doc.role === "counsellor") ? doc.role : "counsellor"));
 const FIREBASE_SDK = "10.12.2";
 const APP_VERSION = "1.0.1";
 
@@ -1091,7 +1097,7 @@ function fbWatchDevice() {
   if (!me) return;
   if (!me.active) { fbSignOut("This account has been disabled."); return; }
   if (me.devices && !me.devices.some((d) => d.id === FB.deviceId) && Session.registered) fbSignOut("You were signed out because this account was opened on another device.");
-  else Session.user = me;
+  else Session.user = Object.assign({}, me, { id: Session.user.id, role: roleFor(Session.user.id, me) });
 }
 async function fbSignOut(msg) { Session.error = msg || ""; Session.registered = false; FB.stopListening(); Session.user = null; try { await FB.auth.signOut(); } catch (e) {} route(); }
 
@@ -1947,26 +1953,8 @@ function screenLogin() {
   pw.addEventListener("keydown", (e) => { if (e.key === "Enter") doSignIn(); });
   box.appendChild(h("button", { class: "btn primary block", type: "button", onclick: doSignIn }, "Sign in"));
   box.appendChild(h("button", { class: "btn link", type: "button", onclick: async () => { if (!email.value) { toast("Enter your email first."); return; } try { await FB.auth.sendPasswordResetEmail(email.value.trim()); toast("Password reset email sent."); } catch (e) { toast("Could not send the reset email."); } } }, "Forgot password"));
-  box.appendChild(h("button", { class: "btn link", type: "button", onclick: () => setupOwnerSheet() }, "First time here? Set up the owner account"));
   mount(box, null);
 }
-function setupOwnerSheet() {
-  const name = textIn({ placeholder: "Your name" }), email = textIn({ type: "email" }), pw = textIn({ type: "password", autocomplete: "new-password" }), err = h("div");
-  openSheet("Set up the owner account", h("div", { class: "stack" },
-    h("div", { class: "small muted" }, "Do this once, straight after deploying. It only works while no owner exists."),
-    field("Your name", name), field("Email", email), field("Password (at least 8 characters)", pw), err,
-    h("button", { class: "btn primary block", type: "button", onclick: async () => {
-      err.innerHTML = ""; if (!name.value.trim() || !email.value.trim() || pw.value.length < 8) { err.appendChild(banner("Fill in all three fields. The password needs 8 or more characters.", "bad")); return; }
-      try {
-        const cr = await FB.auth.createUserWithEmailAndPassword(email.value.trim(), pw.value); const id = cr.user.uid;
-        await FB.db.collection("staff").doc(id).set({ id: id, name: name.value.trim(), email: email.value.trim(), role: "owner", active: true, devices: [], createdAt: nowISO() });
-        await FB.db.collection("meta").doc("bootstrap").set({ at: nowISO(), by: id });
-        await FB.db.collection("config").doc("main").set(clean(Object.assign({ id: "main" }, defaultConfig())));
-        closeSheet();
-      } catch (e) { err.appendChild(banner(e.code === "permission-denied" ? "An owner already exists. Ask them to add you." : (e.message || "Could not set up."), "bad")); }
-    } }, "Create owner account")));
-}
-
 /* ---------- Today ---------- */
 function relDue(d) { const n = diffDays(d, today()); return n > 0 ? "Overdue " + n + (n === 1 ? " day" : " days") : "Due today"; }
 /* ---------- Today: overdue banner, then today's tasks by time of day, then patients with no call planned ---------- */
@@ -3609,20 +3597,35 @@ OWNER.staff = () => {
   DB.staff().sort((a, b) => (a.name < b.name ? -1 : 1)).forEach((s) => {
     const dev = (s.devices || []);
     body.appendChild(h("div", { class: "card" }, h("div", { class: "row between" }, h("div", null, h("div", { class: "b" }, s.name), h("div", { class: "small muted" }, s.email)), chip(s.active ? "Active" : "Disabled", s.active ? "ok" : "bad")),
-      field("Role", selectIn([["owner", "Owner"], ["doctor", "Doctor"], ["counsellor", "Counsellor"]], s.role, (v) => { if (s.id === meId() && v !== "owner") { toast("You cannot remove your own owner role."); return; } Store.update("staff", s.id, { role: v }); })),
+      isAdminUid(s.id) ? h("div", { class: "cap muted" }, "Admin. Set by UID in the app file and in the Firestore rules.") : field("Role", selectIn([["doctor", "Doctor"], ["counsellor", "Counsellor"]], s.role === "doctor" ? "doctor" : "counsellor", (v) => { Store.update("staff", s.id, { role: v }); })),
       h("div", { class: "cap muted" }, dev.length + (dev.length === 1 ? " signed-in device" : " signed-in devices") + (s.lastLoginAt ? ". Last sign-in " + ago(s.lastLoginAt) : "")),
-      h("div", { class: "row wrap" }, dev.length ? h("button", { class: "btn sm", type: "button", onclick: () => { Store.update("staff", s.id, { devices: [] }); toast("Devices removed."); refresh(); } }, "Sign out all devices") : null, s.id !== meId() ? h("button", { class: "btn sm" + (s.active ? " danger" : ""), type: "button", onclick: () => { Store.update("staff", s.id, { active: !s.active, devices: s.active ? [] : (s.devices || []) }); refresh(); } }, s.active ? "Disable account" : "Enable account") : null)));
+      h("div", { class: "row wrap" }, dev.length ? h("button", { class: "btn sm", type: "button", onclick: () => { Store.update("staff", s.id, { devices: [] }); toast("Devices removed."); refresh(); } }, "Sign out all devices") : null, s.id !== meId() && !isAdminUid(s.id) ? h("button", { class: "btn sm" + (s.active ? " danger" : ""), type: "button", onclick: () => { Store.update("staff", s.id, { active: !s.active, devices: s.active ? [] : (s.devices || []) }); refresh(); } }, s.active ? "Disable account" : "Enable account") : null,
+        !isAdminUid(s.id) && s.email ? h("button", { class: "btn sm", type: "button", onclick: async () => { try { await FB.auth.sendPasswordResetEmail(s.email); toast("Reset link sent."); } catch (e) { toast("Could not send the reset link."); } } }, "Send reset link") : null,
+        s.id !== meId() && !isAdminUid(s.id) ? h("button", { class: "btn sm danger", type: "button", onclick: () => confirmSheet("Remove " + s.name + "?", "They lose access to Smile Scout straight away. Their sign-in stays in Firebase. You can add the same email again later.", "Remove", () => { Store.del("staff", s.id); toast("Access removed."); refresh(); }, true) }, "Remove access") : null)));
   });
-  return h("div", null, sub("Staff and roles", "One device per staff account, five for the owner. A new sign-in over the limit signs out the oldest device."), body);
+  return h("div", null, sub("Staff and roles", "One device per staff account, five for admins. A new sign-in over the limit signs out the oldest device. Admins are set by UID in the app file and the Firestore rules."), body);
 };
 function addStaffSheet() {
   const d = { name: "", email: "", pw: "", role: "counsellor" }, err = h("div");
-  openSheet("Add a staff member", h("div", { class: "stack" }, field("Name", textIn({ onInput: (v) => { d.name = v; } })), field("Email", textIn({ type: "email", onInput: (v) => { d.email = v; } })), field("Temporary password (8 or more characters)", textIn({ type: "text", onInput: (v) => { d.pw = v; } }), "Share it with them privately. They can reset it from the sign-in page."), field("Role", seg([["counsellor", "Counsellor"], ["doctor", "Doctor"], ["owner", "Owner"]], d.role, (v) => { d.role = v; })), err,
+  const pwIn = textIn({ type: "text", onInput: (v) => { d.pw = v; } });
+  const gen = h("button", { class: "btn link", type: "button", style: "padding:0;min-height:32px", onclick: () => { const c = "abcdefghjkmnpqrstuvwxyz23456789", a = new Uint32Array(10); crypto.getRandomValues(a); let o = ""; for (let i = 0; i < 10; i++) o += c.charAt(a[i] % c.length); d.pw = o; pwIn.value = o; } }, "Generate password");
+  openSheet("Add a staff member", h("div", { class: "stack" }, field("Name", textIn({ onInput: (v) => { d.name = v; } })), field("Email", textIn({ type: "email", onInput: (v) => { d.email = v; } })), field("Temporary password (8 or more characters)", pwIn, "Share it with them privately. They can reset it from the sign-in page."), gen, field("Role", seg([["counsellor", "Counsellor"], ["doctor", "Doctor"]], d.role, (v) => { d.role = v; })), err,
     h("button", { class: "btn primary block", type: "button", onclick: async () => {
-      err.innerHTML = ""; if (!d.name.trim() || !d.email.trim() || d.pw.length < 8) { err.appendChild(banner("Fill in all fields. The password needs 8 or more characters.", "bad")); return; }
-      try { const sec = firebase.initializeApp(FIREBASE_CONFIG, "secondary-" + Date.now()); const cr = await sec.auth().createUserWithEmailAndPassword(d.email.trim(), d.pw); const id = cr.user.uid; await sec.auth().signOut(); await sec.delete();
-        Store.set("staff", id, { name: d.name.trim(), email: d.email.trim(), role: d.role, active: true, devices: [], createdAt: nowISO() }); closeSheet(); toast("Staff member added."); refresh();
-      } catch (e) { err.appendChild(banner(e.code === "auth/email-already-in-use" ? "That email already has an account." : (e.message || "Could not add the account."), "bad")); }
+      err.innerHTML = ""; const email = d.email.trim();
+      if (!d.name.trim() || !email || d.pw.length < 8) { err.appendChild(banner("Fill in all fields. The password needs 8 or more characters.", "bad")); return; }
+      if (DB.staff().some((x) => String(x.email || "").toLowerCase() === email.toLowerCase())) { err.appendChild(banner("That email is already on the staff list. Use Enable account if it is disabled.", "bad")); return; }
+      let sec = null;
+      try {
+        sec = firebase.initializeApp(FIREBASE_CONFIG, "secondary-" + Date.now()); let id, restored = false;
+        try { const cr = await sec.auth().createUserWithEmailAndPassword(email, d.pw); id = cr.user.uid; }
+        catch (e) { if (e.code !== "auth/email-already-in-use") throw e; const si = await sec.auth().signInWithEmailAndPassword(email, d.pw); id = si.user.uid; restored = true; }
+        await sec.auth().signOut();
+        if (isAdminUid(id)) { err.appendChild(banner("That account is an admin already.", "bad")); return; }
+        Store.set("staff", id, { name: d.name.trim(), email: email, role: d.role, active: true, devices: [], createdAt: nowISO() }); closeSheet(); toast(restored ? "Access restored. Their password is unchanged." : "Staff member added."); refresh();
+      } catch (e) {
+        const wrong = e.code === "auth/wrong-password" || e.code === "auth/invalid-credential" || e.code === "auth/invalid-login-credentials";
+        err.appendChild(banner(wrong ? "That email already has a login. To restore access, type their current password above, or ask them to use Forgot password." : e.code === "auth/operation-not-allowed" ? "Turn on sign-up in Firebase: Authentication, Settings, User actions." : (e.message || "Could not add the account."), "bad"));
+      } finally { if (sec) { try { await sec.delete(); } catch (x) {} } }
     } }, "Add staff member")));
 }
 
@@ -3740,9 +3743,17 @@ async function boot() {
   FB.auth.onAuthStateChanged(async (u) => {
     if (!u) { FB.stopListening(); Session.user = null; Session.registered = false; Store.ready = false; route(); return; }
     try {
-      const snap = await FB.db.collection("staff").doc(u.uid).get();
-      if (!snap.exists || !snap.data().active) { Session.error = snap.exists ? "This account has been disabled." : "This account has not been added by the owner yet."; await FB.auth.signOut(); return; }
-      const user = Object.assign({}, snap.data(), { id: u.uid });
+      let snap = await FB.db.collection("staff").doc(u.uid).get();
+      if (isAdminUid(u.uid)) {
+        /* admin: the Firestore rules must list this UID too. This write only works for a listed admin. */
+        try {
+          await FB.db.collection("meta").doc("adminCheck").set({ at: nowISO(), by: u.uid });
+          const old = snap.exists ? snap.data() : {};
+          if (!snap.exists || old.role !== "owner" || old.active !== true) { await FB.db.collection("staff").doc(u.uid).set(Object.assign({ createdAt: nowISO(), devices: [] }, old, { id: u.uid, name: old.name || u.email || "Admin", email: u.email || old.email || "", role: "owner", active: true })); snap = await FB.db.collection("staff").doc(u.uid).get(); }
+        } catch (e) { console.error(e); Session.error = "This account is an admin in the app file, but the Firestore rules do not list its UID yet. Add it to adminUids in the rules and publish them."; await FB.auth.signOut(); return; }
+      }
+      if (!snap.exists || !snap.data().active) { Session.error = snap.exists ? "This account has been disabled." : "This account has not been added by the admin yet."; await FB.auth.signOut(); return; }
+      const user = Object.assign({}, snap.data(), { id: u.uid, role: roleFor(u.uid, snap.data()) });
       await fbRegisterDevice(user);
       Session.user = user; Session.registered = true; Session.error = "";
       mountPlain(h("div", { class: "pad stack" }, h("div", { class: "wordmark" }, logoImg(40), "Smile Scout"), h("div", { class: "small muted" }, "Loading your data...")));
